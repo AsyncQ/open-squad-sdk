@@ -1,42 +1,249 @@
-# @bradygaster/squad-sdk
+# @asyncq/open-squad-sdk
 
-**Programmable multi-agent runtime for GitHub Copilot.** Build AI teams that persist, learn, and coordinate — with real governance, not vibes.
+**Provider-agnostic multi-agent runtime.** Build AI teams that persist, learn, and coordinate — powered by any LLM, not locked to any vendor.
 
 [![Status](https://img.shields.io/badge/status-production-brightgreen)](#requirements)
-[![Node](https://img.shields.io/badge/node-%E2%89%A520-green)](#requirements)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-green)](#requirements)
 [![ESM](https://img.shields.io/badge/module-ESM--only-blue)](#requirements)
+[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
+
+> Forked from [@bradygaster/squad-sdk](https://github.com/bradygaster/squad) and extended with multi-provider support. All Squad conventions, file structures, and governance stay exactly the same — only the inference layer is swappable.
 
 ---
 
 ## Install
 
 ```bash
-npm install @bradygaster/squad-sdk
+npm install @asyncq/open-squad-sdk
+```
+
+Optional peer dependencies — install only what you need:
+
+```bash
+# GitHub Copilot backend (default)
+npm install @github/copilot-sdk
+
+# Direct Anthropic API backend
+npm install @anthropic-ai/sdk
+
+# OpenRouter or local LLM — already included as a required dep
+# (openai package is bundled)
 ```
 
 ---
 
-## What Makes This Different
+## What Changed From the Original
 
-Most multi-agent setups are prompt engineering. You write a wall of text describing who each agent is, what they can do, and hope the model follows the rules. It works — until it doesn't. Agents ignore routing. They write files they shouldn't. They leak data. There's no enforcement, just suggestions.
+The original `@bradygaster/squad-sdk` is tightly coupled to GitHub Copilot — every agent session goes through the Copilot CLI. This fork replaces that single dependency with a pluggable `ISquadBackend` interface.
 
-Squad's SDK moves orchestration out of prompts and into code:
+Everything else is identical: `.squad/` folder conventions, charter format, routing rules, decisions log, casting engine, skills system, Ralph, hook pipeline.
 
-**Prompt-only orchestration** stuffs everything into a single context window. The coordinator is text. Agents read it, interpret it, maybe follow it.
+| | `@bradygaster/squad-sdk` | `@asyncq/open-squad-sdk` |
+|---|---|---|
+| GitHub Copilot | Required | Optional |
+| OpenRouter | Not supported | Built-in |
+| Local LLM (Ollama, LM Studio) | Not supported | Built-in |
+| Direct Anthropic API | Not supported | Built-in |
+| Per-agent model switching | Not supported | Built-in |
+| `.squad/config.json` escalation model | Not supported | Built-in |
+| All Squad conventions | ✅ | ✅ identical |
+
+---
+
+## Backends
+
+### GitHub Copilot (default)
+
+No config needed — same behaviour as the original SDK.
+
+```ts
+// squad.config.ts
+export default defineConfig({
+  team: { name: 'My Team' },
+  orchestrator: 'copilot', // default
+});
+```
+
+Requires `@github/copilot-sdk` installed. Falls back to a clear error if missing.
+
+---
+
+### OpenRouter
+
+Access any cloud model — Claude, GPT-4, DeepSeek, Gemini — through one endpoint. Swap models per-agent without touching code.
+
+```ts
+// squad.config.ts
+export default defineConfig({
+  team: { name: 'My Team' },
+  orchestrator: 'claude-code',
+  provider: {
+    type: 'openai',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    apiKey: process.env.OPENROUTER_API_KEY,
+  },
+});
+```
+
+```json
+// .squad/config.json
+{
+  "version": 1,
+  "defaultModel": "anthropic/claude-sonnet-4-6",
+  "escalationModel": "anthropic/claude-opus-4-7",
+  "agentModelOverrides": {
+    "danny":  { "model": "anthropic/claude-opus-4-7" },
+    "marcus": { "model": "deepseek/deepseek-chat" },
+    "scribe": { "model": "anthropic/claude-haiku-4-5" }
+  }
+}
+```
+
+---
+
+### Local LLM (LM Studio / Ollama / llama.cpp)
+
+Point `baseUrl` at your local server. No API key needed.
+
+```ts
+// squad.config.ts
+export default defineConfig({
+  team: { name: 'My Team' },
+  provider: {
+    type: 'openai',
+    baseUrl: 'http://localhost:1234/v1', // LM Studio default
+  },
+});
+```
+
+```json
+// .squad/config.json
+{
+  "version": 1,
+  "defaultModel": "llama-3.1-8b-instruct",
+  "escalationModel": "llama-3.3-70b-instruct"
+}
+```
+
+---
+
+### Direct Anthropic API
+
+Skip OpenRouter and call Anthropic directly. Charter system prompts are automatically cached with `cache_control: ephemeral` for ~90% cost reduction on repeated agent turns.
+
+```ts
+// squad.config.ts
+export default defineConfig({
+  team: { name: 'My Team' },
+  provider: {
+    type: 'anthropic',
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  },
+});
+```
+
+---
+
+## Per-Agent Model Switching
+
+`.squad/config.json` is hot-read on every agent invocation. Change a model, the next run picks it up — no restart.
+
+```json
+{
+  "version": 1,
+  "defaultModel": "anthropic/claude-sonnet-4-6",
+  "escalationModel": "anthropic/claude-opus-4-7",
+  "agentModelOverrides": {
+    "marcus": { "model": "deepseek/deepseek-chat" }
+  }
+}
+```
+
+You can also route a single agent to a completely different provider:
+
+```json
+{
+  "agentModelOverrides": {
+    "scribe": {
+      "model": "llama-3.1-8b-instruct",
+      "baseUrl": "http://localhost:1234/v1"
+    }
+  }
+}
+```
+
+### Model comparison workflow
 
 ```
-Prompt says:
-"If the agent is Backend, route auth tasks to it."
-Agent reads it (consumes tokens), decides what to do (might ignore it).
+1. Marcus runs with deepseek/deepseek-chat → opens PR
+2. You review the PR → not satisfied
+3. Edit .squad/config.json → "marcus": { "model": "anthropic/claude-sonnet-4-6" }
+4. Marcus runs again on the same task → Claude produces a different PR
+5. Optionally: Claude-Marcus reviews DeepSeek-Marcus's PR
+6. Pick the result you prefer
 ```
 
-**SDK orchestration** compiles rules into typed functions. Sessions are objects. Routing is deterministic. Tools are validated before execution.
+Update overrides from code:
 
-```typescript
-Router.matchRoute(message) → { agent: 'Backend', priority: 'high' }
-// TypeScript knows exactly which agent runs, with what permissions.
-// HookPipeline runs file-write guards BEFORE the tool executes.
-// No interpretation. No ambiguity. Just code.
+```ts
+import { setAgentModelOverride } from '@asyncq/open-squad-sdk/runtime/agent-model-config';
+
+await setAgentModelOverride('.', 'marcus', {
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+---
+
+## Ralph Escalation Chain
+
+Ralph's triage now has a three-step escalation before anything reaches you:
+
+```
+Issue lands in .squad/decisions/inbox/
+  → Rule-based triage (free, no LLM)
+    → Resolved (high/medium confidence) → writes decision, done
+    → Low confidence / unresolved
+      → LLM call with defaultModel
+        → Resolved → writes decision, done
+        → Unresolved
+          → LLM call with escalationModel
+            → Resolved → writes decision, done
+            → Still unresolved → writes question to developer inbox
+```
+
+Configure Ralph's timer in `squad.config.ts`:
+
+```ts
+export default defineConfig({
+  ralph: {
+    intervalMinutes: 15,
+    maxIssuesPerRun: 20,
+  },
+});
+```
+
+Use `triageIssueWithLlmEscalation()` directly:
+
+```ts
+import { triageIssueWithLlmEscalation } from '@asyncq/open-squad-sdk/ralph/triage';
+
+const result = await triageIssueWithLlmEscalation(
+  issue,
+  rules,
+  modules,
+  roster,
+  {
+    defaultModel: 'anthropic/claude-sonnet-4-6',
+    escalationModel: 'anthropic/claude-opus-4-7',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    apiKey: process.env.OPENROUTER_API_KEY,
+  }
+);
+
+if (result.needsDeveloper) {
+  // write to .squad/decisions/inbox/ for human review
+}
 ```
 
 ---
@@ -44,294 +251,118 @@ Router.matchRoute(message) → { agent: 'Backend', priority: 'high' }
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│  Your Code (TypeScript)                     │
-│  - createSession(), spawnParallel()         │
-│  - SquadClient, EventBus, HookPipeline      │
-└─────────────────────────────────────────────┘
-           ↓
-┌─────────────────────────────────────────────┐
-│  Agent Orchestration Runtime                │
-│  - Router (matchRoute, compileRoutingRules) │
-│  - Charter Compiler (permissions, voice)    │
-│  - Tool Registry (squad_route, etc.)        │
-│  - Hook Pipeline (governance enforcement)   │
-└─────────────────────────────────────────────┘
-           ↓
-┌─────────────────────────────────────────────┐
-│  Session Pool + Event Bus                   │
-│  - Each agent gets a persistent session     │
-│  - Cross-session event pub/sub               │
-│  - Crash recovery via session state         │
-└─────────────────────────────────────────────┘
-           ↓
-┌─────────────────────────────────────────────┐
-│  @github/copilot-sdk                        │
-│  - Real-time agent streaming                │
-│  - Tool execution                           │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Orchestrator (your choice)                     │
+│  - 'claude-code': Claude Code reads .squad/,    │
+│    routes work, invokes agents sequentially     │
+│  - 'copilot': GitHub Copilot drives the loop    │
+└─────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│  Agent Orchestration Runtime                    │
+│  - Router (matchRoute, compileRoutingRules)     │
+│  - Charter Compiler (permissions, voice)        │
+│  - Model Selector (4-layer priority)            │
+│  - Hook Pipeline (governance enforcement)       │
+└─────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│  Session Pool + Event Bus                       │
+│  - Each agent gets a persistent session         │
+│  - Cross-session event pub/sub                  │
+│  - State persisted to .squad/ between runs      │
+└─────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│  ISquadBackend (swappable)                      │
+│  ┌────────────┐ ┌────────────┐ ┌─────────────┐ │
+│  │  Copilot   │ │ OpenAI-    │ │  Anthropic  │ │
+│  │  Backend   │ │ Compatible │ │  Backend    │ │
+│  │ (optional) │ │ (OpenRouter│ │  (optional) │ │
+│  │            │ │ /local LLM)│ │             │ │
+│  └────────────┘ └────────────┘ └─────────────┘ │
+└─────────────────────────────────────────────────┘
 ```
-
-Your code sits at the top. The runtime handles routing, permissions, and governance. Sessions are persistent and recoverable. Everything runs on top of the official Copilot SDK.
-
----
-
-## Custom Tools
-
-Five tools let agents coordinate without calling you back. Here are the three you'll reach for first.
-
-### `squad_route` — Hand off work between agents
-
-```typescript
-const tool = toolRegistry.getTool('squad_route');
-await tool.handler({
-  targetAgent: 'McManus',
-  task: 'Write a blog post on the new casting system',
-  priority: 'high',
-  context: 'Feature launches next week',
-});
-```
-
-The lead routes a task to DevRel. A new session is created, context is passed, and the task is queued with priority. No human in the loop.
-
-### `squad_decide` — Record a team decision
-
-```typescript
-await tool.handler({
-  author: 'Keaton',
-  summary: 'Use PostgreSQL, not MongoDB',
-  body: 'Chose PostgreSQL for: (1) transactions, (2) team expertise, (3) JSONB flexibility.',
-  references: ['architecture-spike'],
-});
-```
-
-Writes to the shared decision log. Every agent reads decisions before working — one call propagates context to the entire team.
-
-### `squad_memory` — Teach an agent something permanent
-
-```typescript
-await tool.handler({
-  agent: 'Frontend',
-  section: 'learnings',
-  content: 'Project uses Tailwind v4 with dark mode plugin. Config at .styles/theme.config.ts',
-});
-```
-
-Agents learn as they work. Next session, Frontend reads this and knows immediately. No context hunting, no re-explaining.
-
-> Two more tools — `squad_status` (query the session pool) and `squad_skill` (read/write compressed learnings) — round out the coordination layer. See the [full docs](https://github.com/bradygaster/squad#the-custom-tools) for details.
 
 ---
 
 ## Hook Pipeline
 
-Rules don't live in prompts. They run as code, before tools execute.
-
-### File-Write Guards
+Rules run as code before tools execute — not as prompt suggestions.
 
 ```typescript
 const pipeline = new HookPipeline({
   allowedWritePaths: ['src/**/*.ts', '.squad/**', 'docs/**'],
-});
-
-// An agent tries to write to /etc/passwd
-// → Blocked. "File write blocked: '/etc/passwd' does not match allowed paths"
-```
-
-No agent — compromised or confused — can write outside your safe zones. Not because you asked nicely in the prompt. Because code won't let them.
-
-### PII Scrubbing
-
-```typescript
-const pipeline = new HookPipeline({
   scrubPii: true,
-});
-
-// Agent logs: "contact brady@example.com about deploy"
-// Output becomes: "contact [EMAIL_REDACTED] about deploy"
-```
-
-Sensitive data never escapes. Automatic, invisible to the agent, applied to every tool output.
-
-### Reviewer Lockout
-
-```typescript
-const lockout = pipeline.getReviewerLockout();
-lockout.lockout('src/auth.ts', 'Backend');
-
-// Backend tries to re-write auth.ts after a review rejection
-// → Blocked. "Agent 'Backend' is locked out of artifact 'src/auth.ts'"
-```
-
-When a reviewer says "no," it sticks. The original author can't sneak a fix in. Protocol enforced by code, not convention.
-
-### Ask-User Rate Limiter
-
-```typescript
-const pipeline = new HookPipeline({
   maxAskUserPerSession: 3,
 });
-
-// Fourth attempt to prompt the user → Blocked.
-// "ask_user rate limit exceeded: 3/3 calls used. Proceed without user input."
 ```
 
-Agents don't stall waiting for you. They decide or move on.
+- **File-write guards** — agents can't write outside allowed paths, period
+- **PII scrubbing** — emails, tokens, secrets never escape tool output
+- **Reviewer lockout** — once a reviewer rejects a file, the original author can't rewrite it
+- **Ask-user rate limiter** — agents decide or move on; they don't stall waiting for you
 
 ---
 
-## Persistent Sessions & Crash Recovery
+## Persistent Sessions
 
-Sessions aren't ephemeral. They're durable objects that survive failures.
+Sessions survive crashes. State persists to `.squad/` between runs.
 
 ```typescript
 const session = await client.createSession({
   agentName: 'Backend',
   task: 'Implement user auth endpoints',
-  persistPath: '.squad/sessions/backend-auth-001.json',
 });
 
-// Agent dies mid-work — network hiccup, model timeout, anything.
-// Later:
-
-const resumed = await client.resumeSession(
-  '.squad/sessions/backend-auth-001.json'
-);
-
-// Backend wakes up knowing:
-// - What the task was
-// - What it already wrote
-// - Where it left off
-// No repetition, no lost context.
+// Agent crashes mid-work
+const resumed = await client.resumeSession(sessionId);
+// Backend wakes up knowing what it wrote and where it left off
 ```
 
 ---
 
-## Storage Abstraction
+## Storage
 
-Squad separates I/O from business logic. All persistent storage — sessions, state, decisions, histories — flows through a pluggable `StorageProvider` interface. Swap the backend (filesystem, database, cloud) without touching orchestration code.
-
-### Built-in Providers
+All persistent I/O flows through a pluggable `StorageProvider`.
 
 | Provider | Use When |
 |----------|----------|
-| `FSStorageProvider` | Running on Node.js. Stores everything on disk. |
-| `InMemoryStorageProvider` | Writing unit tests or running ephemeral sessions. |
-| `SQLiteStorageProvider` | Need a single portable database file. Works on all platforms (runs on WASM). |
-
-### Build Your Own
-
-Implement the `StorageProvider` interface:
-
-```typescript
-import type { StorageProvider } from '@bradygaster/squad-sdk';
-
-export class MyCloudStorageProvider implements StorageProvider {
-  async read(filePath: string): Promise<string | undefined> {
-    // Fetch from Azure Blob, S3, or your service
-    try {
-      return await this.client.getBlob(filePath);
-    } catch (e) {
-      if (e.code === 'NotFound') return undefined;
-      throw e;
-    }
-  }
-
-  async write(filePath: string, data: string): Promise<void> {
-    // Store to cloud
-    await this.client.putBlob(filePath, data);
-  }
-
-  // Implement remaining methods: append, exists, list, delete, deleteDir, isDirectory, mkdir, rename, copy, stat
-  // + sync variants (deprecated in Wave 2)
-}
-```
-
-See `storage-provider-azure` and `storage-provider-sqlite` samples for complete implementations.
-
----
-
-## The Casting Engine
-
-Agents aren't `role-1`, `role-2`. They have names, personalities, and persistent identities across sessions. The casting engine assigns them automatically from a thematic universe.
-
-```typescript
-const casting = new CastingEngine({
-  universe: 'usual-suspects',
-  agentCount: 5,
-});
-
-const cast = casting.castTeam({
-  roles: ['lead', 'frontend', 'backend', 'tester', 'scribe'],
-});
-// → [
-//   { role: 'lead', agentName: 'Keaton' },
-//   { role: 'frontend', agentName: 'McManus' },
-//   { role: 'backend', agentName: 'Verbal' },
-//   { role: 'tester', agentName: 'Fenster' },
-//   { role: 'scribe', agentName: 'Kobayashi' },
-// ]
-```
-
-Names are memorable ("Keaton handles routing"), persistent (same name every session), and extensible (add a sixth agent — the casting engine picks the next name from the universe). You build a relationship with your agents over time.
-
----
-
-## Event-Driven Monitoring
-
-Ralph is the built-in work monitor — a persistent agent session that subscribes to everything happening on the team.
-
-```typescript
-const ralph = new RalphMonitor({
-  teamRoot: '.squad',
-  healthCheckInterval: 30000,
-  statePath: '.squad/ralph-state.json',
-});
-
-ralph.subscribe('agent:task-complete', (event) => {
-  console.log(`✅ ${event.agentName} finished: ${event.task}`);
-});
-
-ralph.subscribe('agent:error', (event) => {
-  console.log(`❌ ${event.agentName} failed: ${event.error}`);
-});
-
-await ralph.start();
-```
-
-When agents complete work, record decisions, or hit errors — Ralph knows. If an agent crashes, Ralph remembers where it left off.
+| `FSStorageProvider` | Default — stores everything on disk |
+| `InMemoryStorageProvider` | Unit tests or ephemeral sessions |
+| `SQLiteStorageProvider` | Single portable database file (WASM, works everywhere) |
 
 ---
 
 ## API Reference
 
-| Module | Key Exports | Purpose |
-|--------|------------|---------|
-| `resolution` | `resolveSquad()`, `resolveGlobalSquadPath()`, `ensureSquadPath()` | Find `.squad/` directory; platform-specific global path; path validation |
-| `config` | `loadConfig()`, `loadConfigSync()` | Load and parse squad configuration from disk |
-| `agents` | Agent onboarding utilities | Register and initialize agents; manage team discovery |
-| `casting` | `CastingEngine` | Universe selection, name allocation, persistent registry |
-| `skills` | Skills system | SKILL.md lifecycle, confidence levels |
-| `coordinator` | `selectResponseTier()`, `getTier()` | Route requests to Direct/Lightweight/Standard/Full tiers |
-| `runtime` | Streaming pipeline, cost tracker, telemetry | Core async execution, event streaming, i18n |
-| `cli` | `checkForUpdate()`, `performUpgrade()` | SDK version management and update checking |
-| `marketplace` | Plugin marketplace | Discover and manage plugins |
+| Module | Key Exports |
+|--------|-------------|
+| `adapter/backend` | `ISquadBackend`, `ResolvedAgentBackendConfig` |
+| `adapter/backends` | `CopilotBackend`, `OpenAICompatibleBackend`, `AnthropicBackend` |
+| `runtime/agent-model-config` | `loadAgentModelConfig()`, `resolveAgentModel()`, `setAgentModelOverride()` |
+| `ralph/triage` | `triageIssue()`, `triageIssueWithLlmEscalation()` |
+| `config` | `loadConfig()`, `loadConfigSync()` |
+| `casting` | `CastingEngine` |
+| `skills` | Skills system |
+| `coordinator` | `selectResponseTier()` |
+| `runtime` | Streaming pipeline, cost tracker, telemetry |
 
 ---
 
 ## Requirements
 
-- **Node.js** ≥ 20.0.0
+- **Node.js** ≥ 22.5.0
 - **TypeScript** ≥ 5.0
-- **ESM-only** — no CommonJS. Set `"type": "module"` in your `package.json`.
+- **ESM-only** — set `"type": "module"` in your `package.json`
 
 ---
 
 ## Links
 
-- **Repository:** [github.com/bradygaster/squad](https://github.com/bradygaster/squad)
-- **CLI package:** [@bradygaster/squad-cli](https://www.npmjs.com/package/@bradygaster/squad-cli)
-- **Issues:** [github.com/bradygaster/squad/issues](https://github.com/bradygaster/squad/issues)
+- **Repository:** [github.com/AsyncQ/open-squad-sdk](https://github.com/AsyncQ/open-squad-sdk)
+- **Issues:** [github.com/AsyncQ/open-squad-sdk/issues](https://github.com/AsyncQ/open-squad-sdk/issues)
+- **Original SDK:** [github.com/bradygaster/squad](https://github.com/bradygaster/squad)
 
 ---
 
